@@ -1242,6 +1242,104 @@ func TestGraphQLDataSource(t *testing.T) {
 		},
 		Fields: []plan.FieldConfiguration{},
 	}))
+	t.Run("variable at top level and recursively", RunTest(variableSchema, `
+		query MyQuery($name: String!){
+            user(name: $name){
+                normalized(data: {name: $name})
+            }
+        }
+    `, "MyQuery", &plan.SynchronousResponsePlan{
+		Response: &resolve.GraphQLResponse{
+			Data: &resolve.Object{
+				Fetch: &resolve.SingleFetch{
+					DataSource: &Source{},
+					BufferId:   0,
+					Input:      `{"method":"POST","url":"https://swapi.com/graphql","body":{"query":"query($name: String!){user(name: $name){normalized(data: {name: $name})}}","variables":{"name":$$0$$}}}`,
+					Variables: resolve.NewVariables(
+						&resolve.ContextVariable{
+							Path:     []string{"name"},
+							Renderer: resolve.NewJSONVariableRendererWithValidation(`{"type":["string"]}`),
+						},
+					),
+					DataSourceIdentifier:  []byte("graphql_datasource.Source"),
+					ProcessResponseConfig: resolve.ProcessResponseConfig{ExtractGraphqlResponse: true},
+				},
+				Fields: []*resolve.Field{
+					{
+						HasBuffer: true,
+						BufferID:  0,
+						Name:      []byte("user"),
+						Position: resolve.Position{
+							Line:   3,
+							Column: 13,
+						},
+						Value: &resolve.Object{
+							Path:     []string{"user"},
+							Nullable: true,
+							Fields: []*resolve.Field{
+								{
+									Name: []byte("normalized"),
+									Value: &resolve.String{
+										Path: []string{"normalized"},
+									},
+									Position: resolve.Position{
+										Line:   4,
+										Column: 17,
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}, plan.Configuration{
+		DataSources: []plan.DataSourceConfiguration{
+			{
+				RootNodes: []plan.TypeField{
+					{
+						TypeName:   "Query",
+						FieldNames: []string{"user"},
+					},
+				},
+				ChildNodes: []plan.TypeField{
+					{
+						TypeName:   "User",
+						FieldNames: []string{"normalized"},
+					},
+				},
+				Factory: &Factory{},
+				Custom: ConfigJson(Configuration{
+					Fetch: FetchConfiguration{
+						URL: "https://swapi.com/graphql",
+					},
+					UpstreamSchema: variableSchema,
+				}),
+			},
+		},
+		Fields: []plan.FieldConfiguration{
+			{
+				TypeName:  "Query",
+				FieldName: "user",
+				Arguments: []plan.ArgumentConfiguration{
+					{
+						Name:       "name",
+						SourceType: plan.FieldArgumentSource,
+					},
+				},
+			},
+			{
+				TypeName:  "User",
+				FieldName: "normalized",
+				Arguments: []plan.ArgumentConfiguration{
+					{
+						Name:       "data",
+						SourceType: plan.FieldArgumentSource,
+					},
+				},
+			},
+		},
+	}))
 	t.Run("exported field", RunTest(starWarsSchemaWithExportDirective, `
 		query MyQuery($id: ID! $heroName: String!){
 			droid(id: $id){
@@ -3249,7 +3347,7 @@ func TestGraphQLDataSource(t *testing.T) {
 	t.Run("mutation with variables in array object argument", RunTest(
 		todoSchema,
 		`mutation AddTask($title: String!, $completed: Boolean!, $name: String! @fromClaim(name: "sub")) {
-					  addTask(input: [{title: $title, completed: $completed, user: {name: $name}}]){
+					  addTask(input: [{titleSets: [[$title]], completed: $completed, user: {name: $name}}]){
 						task {
 						  id
 						  title
@@ -3263,7 +3361,7 @@ func TestGraphQLDataSource(t *testing.T) {
 				Data: &resolve.Object{
 					Fetch: &resolve.SingleFetch{
 						BufferId:   0,
-						Input:      `{"method":"POST","url":"https://graphql.service","body":{"query":"mutation($title: String!, $completed: Boolean!, $name: String!){addTask(input: [{title: $title,completed: $completed,user: {name: $name}}]){task {id title completed}}}","variables":{"name":$$2$$,"completed":$$1$$,"title":$$0$$}}}`,
+						Input:      `{"method":"POST","url":"https://graphql.service","body":{"query":"mutation($title: String!, $completed: Boolean!, $name: String!){addTask(input: [{titleSets: [[$title]],completed: $completed,user: {name: $name}}]){task {id title completed}}}","variables":{"name":$$2$$,"completed":$$1$$,"title":$$0$$}}}`,
 						DataSource: &Source{},
 						Variables: resolve.NewVariables(
 							&resolve.ContextVariable{
@@ -3276,7 +3374,7 @@ func TestGraphQLDataSource(t *testing.T) {
 							},
 							&resolve.ContextVariable{
 								Path:     []string{"name"},
-								Renderer: resolve.NewJSONVariableRendererWithValidation(`{"type":["string","null"]}`),
+								Renderer: resolve.NewJSONVariableRendererWithValidation(`{"type":["string"]}`),
 							},
 						),
 						DisallowSingleFlight:  true,
@@ -5547,6 +5645,65 @@ func runTestOnTestDefinition(operation, operationName string, expectedPlan plan.
 	return RunTest(testDefinition, operation, operationName, expectedPlan, config, extraChecks...)
 }
 
+func TestUnNullVariables(t *testing.T){
+
+	t.Run("variables with whitespace", func(t *testing.T) {
+		s := &Source{}
+		out := s.compactAndUnNullVariables([]byte(`{"body":{"variables":{"email":null,"firstName": "FirstTest",		"lastName":"LastTest","phone":123456,"preferences":{ "notifications":{}},"password":"password"}}}`))
+		expected := `{"body":{"variables":{"firstName":"FirstTest","lastName":"LastTest","phone":123456,"password":"password"}}}`
+		assert.Equal(t, expected,string(out))
+	})
+
+	t.Run("empty variables", func(t *testing.T) {
+		s := &Source{}
+		out := s.compactAndUnNullVariables([]byte(`{"body":{"variables":{}}}`))
+		expected := `{"body":{"variables":{}}}`
+		assert.Equal(t, expected,string(out))
+	})
+
+	t.Run("two variables, one null", func(t *testing.T) {
+		s := &Source{}
+		out := s.compactAndUnNullVariables([]byte(`{"body":{"variables":{"a":null,"b":true}}}`))
+		expected := `{"body":{"variables":{"b":true}}}`
+		assert.Equal(t, expected,string(out))
+	})
+
+	t.Run("two variables, one null reverse", func(t *testing.T) {
+		s := &Source{}
+		out := s.compactAndUnNullVariables([]byte(`{"body":{"variables":{"a":true,"b":null}}}`))
+		expected := `{"body":{"variables":{"a":true}}}`
+		assert.Equal(t, expected,string(out))
+	})
+
+	t.Run("null variables", func(t *testing.T) {
+		s := &Source{}
+		out := s.compactAndUnNullVariables([]byte(`{"body":{"variables":null}}`))
+		expected := `{"body":{"variables":null}}`
+		assert.Equal(t, expected,string(out))
+	})
+
+	t.Run("ignore null inside non variables", func(t *testing.T) {
+		s := &Source{}
+		out := s.compactAndUnNullVariables([]byte(`{"body":{"variables":{"foo":null},"body":"query {foo(bar: null){baz}}"}}`))
+		expected := `{"body":{"variables":{},"body":"query {foo(bar: null){baz}}"}}`
+		assert.Equal(t, expected,string(out))
+	})
+
+	t.Run("variables missing", func(t *testing.T) {
+		s := &Source{}
+		out := s.compactAndUnNullVariables([]byte(`{"body":{"query":"{foo}"}}`))
+		expected := `{"body":{"query":"{foo}"}}`
+		assert.Equal(t, expected,string(out))
+	})
+
+	t.Run("variables null", func(t *testing.T) {
+		s := &Source{}
+		out := s.compactAndUnNullVariables([]byte(`{"body":{"query":"{foo}","variables":null}}`))
+		expected := `{"body":{"query":"{foo}","variables":null}}`
+		assert.Equal(t, expected,string(out))
+	})
+}
+
 func BenchmarkFederationBatching(b *testing.B) {
 	userService := FakeDataSource(`{"data":{"me": {"id": "1234","username": "Me","__typename": "User"}}}`)
 	reviewsService := FakeDataSource(`{"data":{"_entities":[{"reviews": [{"body": "A highly effective form of birth control.","product": {"upc": "top-1","__typename": "Product"}},{"body": "Fedoras are one of the most fashionable hats around and can look great with a variety of outfits.","product": {"upc": "top-2","__typename": "Product"}}]}]}}`)
@@ -5771,6 +5928,27 @@ type RegisteredUser implements User {
     displayName: String!
     isLoggedIn: Boolean!
 	hasVerifiedEmail: Boolean!
+}
+`
+
+const variableSchema = `
+
+scalar String
+
+schema {
+	query: Query
+}
+
+type Query {
+	user(name: String!): User
+}
+
+type User {
+    normalized(data: NormalizedDataInput!): String!
+}
+
+input NormalizedDataInput {
+    name: String!
 }
 `
 
@@ -6296,7 +6474,7 @@ enum UserOrderable {
 """"""
 input AddTaskInput {
   """"""
-  title: String!
+  titleSets: [[String!]]
   """"""
   completed: Boolean!
   """"""

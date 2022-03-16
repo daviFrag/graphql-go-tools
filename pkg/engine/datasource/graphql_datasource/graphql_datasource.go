@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 
+	"github.com/buger/jsonparser"
 	"github.com/jensneuse/graphql-go-tools/pkg/asttransform"
 	"github.com/tidwall/sjson"
 
@@ -812,17 +813,14 @@ func (p *Planner) addVariableDefinitionsRecursively(value ast.Value, sourcePath 
 		return
 	}
 
-	variableDefinitionTypeName := p.visitor.Operation.ResolveTypeNameString(p.visitor.Operation.VariableDefinitions[variableDefinition].Type)
+	variableDefinitionTypeRef := p.visitor.Operation.VariableDefinitions[variableDefinition].Type
+	variableDefinitionTypeName := p.visitor.Operation.ResolveTypeNameString(variableDefinitionTypeRef)
 	variableDefinitionTypeName = p.visitor.Config.Types.RenameTypeNameOnMatchStr(variableDefinitionTypeName)
 
-	importedVariableDefinition := p.visitor.Importer.ImportVariableDefinitionWithRename(variableDefinition, p.visitor.Operation, p.upstreamOperation, variableDefinitionTypeName)
-	p.upstreamOperation.AddImportedVariableDefinitionToOperationDefinition(p.nodes[0].Ref, importedVariableDefinition)
-
-	fieldType := p.resolveNestedArgumentType(fieldName)
 	contextVariable := &resolve.ContextVariable{
 		Path: append(sourcePath, variableNameStr),
 	}
-	renderer, err := resolve.NewJSONVariableRendererWithValidationFromTypeRef(p.visitor.Definition, p.visitor.Definition, fieldType)
+	renderer, err := resolve.NewJSONVariableRendererWithValidationFromTypeRef(p.visitor.Operation, p.visitor.Definition, variableDefinitionTypeRef)
 	if err != nil {
 		return
 	}
@@ -831,6 +829,10 @@ func (p *Planner) addVariableDefinitionsRecursively(value ast.Value, sourcePath 
 	if variableExists {
 		return
 	}
+
+	importedVariableDefinition := p.visitor.Importer.ImportVariableDefinitionWithRename(variableDefinition, p.visitor.Operation, p.upstreamOperation, variableDefinitionTypeName)
+	p.upstreamOperation.AddImportedVariableDefinitionToOperationDefinition(p.nodes[0].Ref, importedVariableDefinition)
+
 	p.upstreamVariables, _ = sjson.SetRawBytes(p.upstreamVariables, variableNameStr, []byte(contextVariableName))
 }
 
@@ -1153,7 +1155,65 @@ type Source struct {
 	httpClient *http.Client
 }
 
+func (s *Source) compactAndUnNullVariables(input []byte) []byte {
+	variables, _, _, err := jsonparser.Get(input, "body","variables")
+	if err != nil {
+		return input
+	}
+	if bytes.Equal(variables, []byte("null")) || bytes.Equal(variables, []byte("{}")) {
+		return input
+	}
+	if bytes.ContainsAny(variables, " \t\n\r") {
+		buf := bytes.NewBuffer(make([]byte, 0, len(variables)))
+		_ = json.Compact(buf, variables)
+		variables = buf.Bytes()
+	}
+	cp := make([]byte, len(variables))
+	copy(cp, variables)
+	variables = cp
+	var changed bool
+	for {
+		variables, changed = s.unNullVariables(variables)
+		if !changed {
+			break
+		}
+	}
+	input, _ = jsonparser.Set(input, variables, "body","variables")
+	return input
+}
+
+func (s *Source) unNullVariables(input []byte) ([]byte, bool) {
+	if i := bytes.Index(input, []byte(":{}")); i != -1 {
+		end := i + 3
+		hasTrainlingComma := false
+		if input[end] == ',' {
+			end++
+			hasTrainlingComma = true
+		}
+		startQuote := bytes.LastIndex(input[:i-2], []byte("\""))
+		if !hasTrainlingComma && input[startQuote-1] == ',' {
+			startQuote--
+		}
+		return append(input[:startQuote], input[end:]...), true
+	}
+	if i := bytes.Index(input, []byte("null")); i != -1 {
+		end := i + 4
+		hasTrailingComma := false
+		if input[end] == ',' {
+			end++
+			hasTrailingComma = true
+		}
+		startQuote := bytes.LastIndex(input[:i-2], []byte("\""))
+		if !hasTrailingComma && input[startQuote-1] == ',' {
+			startQuote--
+		}
+		return append(input[:startQuote], input[end:]...), true
+	}
+	return input, false
+}
+
 func (s *Source) Load(ctx context.Context, input []byte, writer io.Writer) (err error) {
+	input = s.compactAndUnNullVariables(input)
 	return httpclient.Do(s.httpClient, ctx, input, writer)
 }
 
