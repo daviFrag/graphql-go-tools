@@ -110,7 +110,8 @@ func (c *WebSocketGraphQLSubscriptionClient) Subscribe(ctx context.Context, opti
 		options.Header = http.Header{}
 	}
 
-	initMessage, err := connectionInitMessage(options.Header)
+	initPayload := ctx.Value("initPayload")
+	initMessage, err := connectionInitMessage(options.Header, initPayload)
 	if err != nil {
 		return err
 	}
@@ -184,15 +185,15 @@ func (c *WebSocketGraphQLSubscriptionClient) generateHandlerIDHash(options Graph
 	return xxh.Sum64(), nil
 }
 
-func connectionInitMessage(header http.Header) (string, error) {
-	if len(header) == 0 {
-		return initMessageNoPayload, nil
-	}
-	payload := make(map[string]interface{}, len(header))
-	for name := range header {
-		payload[name] = header.Get(name)
-	}
-	payloadBytes, err := json.Marshal(payload)
+func connectionInitMessage(header http.Header, initPayload interface{}) (string, error) {
+	// if len(header) == 0 {
+	// 	return initMessageNoPayload, nil
+	// }
+	// payload := make(map[string]interface{}, len(header))
+	// for name := range header {
+	// 	payload[name] = header.Get(name)
+	// }
+	payloadBytes, err := json.Marshal(initPayload)
 	if err != nil {
 		return "", err
 	}
