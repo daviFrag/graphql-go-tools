@@ -84,7 +84,13 @@ func NewWebSocketGraphQLSubscriptionClient(httpClient *http.Client, ctx context.
 // If an existing WS with the same ID (Hash) exists, it is being re-used
 // If no connection exists, the client initiates a new one and sends the "init" and "connection ack" messages
 func (c *WebSocketGraphQLSubscriptionClient) Subscribe(ctx context.Context, options GraphQLSubscriptionOptions, next chan<- []byte) error {
-	handlerID, err := c.generateHandlerIDHash(options)
+	initPayload := ctx.Value("initPayload")
+	initMessage, err := connectionInitMessage(options.Header, initPayload)
+	if err != nil {
+		return err
+	}
+
+	handlerID, err := c.generateHandlerIDHash(options, initMessage)
 	if err != nil {
 		return err
 	}
@@ -108,12 +114,6 @@ func (c *WebSocketGraphQLSubscriptionClient) Subscribe(ctx context.Context, opti
 
 	if options.Header == nil {
 		options.Header = http.Header{}
-	}
-
-	initPayload := ctx.Value("initPayload")
-	initMessage, err := connectionInitMessage(options.Header, initPayload)
-	if err != nil {
-		return err
 	}
 
 	options.Header.Set("Sec-WebSocket-Protocol", "graphql-ws")
@@ -165,7 +165,7 @@ func (c *WebSocketGraphQLSubscriptionClient) Subscribe(ctx context.Context, opti
 }
 
 // generateHandlerIDHash generates a Hash based on: URL and Headers to uniquely identify Upgrade Requests
-func (c *WebSocketGraphQLSubscriptionClient) generateHandlerIDHash(options GraphQLSubscriptionOptions) (uint64, error) {
+func (c *WebSocketGraphQLSubscriptionClient) generateHandlerIDHash(options GraphQLSubscriptionOptions, initMessage string) (uint64, error) {
 	var (
 		err error
 	)
@@ -174,6 +174,10 @@ func (c *WebSocketGraphQLSubscriptionClient) generateHandlerIDHash(options Graph
 	xxh.Reset()
 
 	_, err = xxh.WriteString(options.URL)
+	if err != nil {
+		return 0, err
+	}
+	_, err = xxh.WriteString(initMessage)
 	if err != nil {
 		return 0, err
 	}
